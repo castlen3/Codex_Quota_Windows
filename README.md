@@ -1,3 +1,5 @@
+[English](README.md) | [繁體中文](README_zh.md)
+
 # Codex Quota Overlay
 
 Real-time desktop widget showing your OpenAI Codex / ChatGPT quota usage.  
@@ -77,7 +79,7 @@ The endpoint returns:
 
 - Your access token is read from `auth.json` on disk and used **only** for the single API call to `chatgpt.com/backend-api/codex/usage`.
 - No data is logged, stored, or sent anywhere else.
-- The source is 250 lines — you can audit it in 5 minutes.
+- The source is ~250 lines — you can audit it in 5 minutes.
 
 ## License
 
