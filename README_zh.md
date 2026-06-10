@@ -1,59 +1,68 @@
+# Codex Quota Overlay for Windows
+
 [English](README.md) | [繁體中文](README_zh.md)
 
-# Codex Quota Overlay
+這是一個 Windows 桌面小工具，用來顯示 OpenAI Codex / ChatGPT 的 quota 使用狀態。
 
-即時桌面小工具，顯示你的 OpenAI Codex / ChatGPT 用量配額。  
-直接從官方 `chatgpt.com/backend-api/codex/usage` 端點取得資料。
+它會讀取本機 Codex OAuth token，也就是 `%USERPROFILE%\.codex\auth.json`，呼叫 ChatGPT usage endpoint，然後用小型 Tkinter 浮窗顯示 5 小時與 7 天 rolling quota。
 
 ![screenshot](screenshot.png)
 
-## 功能特色
+## 這版更新
 
-- **即時用量條** — 5 小時與 7 天滾動視窗
-- **顏色警示** — 綠色（≥50%）、黃色（20–49%）、紅色（<20%）
-- **自動刷新** 每 30 秒更新一次
-- **置頂切換** 右鍵選單可切換 Always on top
-- **零依賴** 純 Python 標準庫（tkinter, json, urllib, threading）
-- **Windows 原生** 小視窗，不開瀏覽器、不吃 Electron
+- 優先使用 `https://chatgpt.com/backend-api/wham/usage`。
+- `https://chatgpt.com/backend-api/codex/usage` 改為備援。
+- User-Agent 改為 `codex-cli`，避免新版 Codex usage endpoint 在某些請求指紋下回傳 `403`。
+- 狀態顯示更清楚，例如 `blocked 403`、`timeout`、`login missing`、`network error`。
+- 如果更新失敗，會保留上一筆成功讀到的 quota，不會整個變成空白。
+- 本機診斷訊息會寫入 `codex_quota_overlay.log`。
+- 上一筆成功讀取結果會快取在 `codex_quota_overlay_cache.json`。
+- 視窗改成較大的卡片版面，底部不會被截掉。
 
-## 系統需求
+## 功能
 
-- **Windows 10/11**
-- **Python 3.9+** 含 tkinter（Windows 安裝 Python 時預設已包含）
-- **Codex Desktop** 已安裝並透過 ChatGPT 登入
+- 即時顯示 5 小時與 7 天 quota。
+- 依剩餘比例用綠色、黃色、紅色顯示。
+- 每 30 秒自動更新。
+- 右鍵選單支援重新整理、永遠置頂、開啟 log 資料夾、關閉。
+- 不需要第三方 Python 套件。
+- Windows 原生小浮窗，不需要瀏覽器或 Electron。
 
-工具會從 `%USERPROFILE%\.codex\auth.json` 讀取你的 access token — 就是 Codex Desktop 內部使用的同一個檔案。憑證不會被儲存或傳送到其他地方。
+## 需求
+
+- Windows 10 或 Windows 11。
+- Python 3.9+，需包含 Tkinter。
+- Codex Desktop 或 Codex CLI 已用 ChatGPT 登入。
 
 ## 快速開始
 
-1. 確認 [Codex Desktop](https://codex.openai.com/) 已安裝且已登入
-2. 雙擊 `launch.vbs`
-
-一個小視窗會出現在螢幕左上角。右鍵點擊可開啟選單。
+1. 確認 Codex 已安裝並登入。
+2. 雙擊 `launch.vbs`。
+3. 在小工具上按右鍵可開啟選單。
 
 ## 手動執行
 
-```bash
+```powershell
 python codex_quota_overlay.py
 ```
 
-不顯示命令列視窗：
+不顯示 console 視窗：
 
-```bash
+```powershell
 pythonw codex_quota_overlay.py
 ```
 
-## 運作原理
+## 運作方式
 
-```
-auth.json (本機)  →  access_token
-                            ↓
-chatgpt.com/backend-api/codex/usage  →  rate_limit JSON
-                            ↓
-                    tkinter 小視窗（每 30 秒自動刷新）
+```text
+%USERPROFILE%\.codex\auth.json
+        -> access token
+        -> chatgpt.com/backend-api/wham/usage
+        -> rate_limit JSON
+        -> Tkinter overlay
 ```
 
-API 回傳的資料格式：
+API 回傳格式大致如下：
 
 ```json
 {
@@ -77,9 +86,9 @@ API 回傳的資料格式：
 
 ## 隱私
 
-- 你的 access token 只從本機 `auth.json` 讀取，僅用於向 `chatgpt.com/backend-api/codex/usage` 發出單次 API 呼叫。
-- 不會記錄、儲存或傳送任何資料到其他地方。
-- 全部程式碼約 250 行，5 分鐘就能審查完畢。
+- access token 只會從本機 Codex auth 檔讀取，並只送到 `chatgpt.com` 查詢 usage。
+- 專案內不包含 token、帳號 email、個人路徑或 quota 快照。
+- log 與 cache 等執行期間產生的檔案已加入 Git 忽略清單。
 
 ## 授權
 

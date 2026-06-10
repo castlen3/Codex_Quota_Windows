@@ -1,59 +1,68 @@
-[English](README.md) | [繁體中文](README_zh.md)
+# Codex Quota Overlay for Windows
 
-# Codex Quota Overlay
+[English](README.md) | [Traditional Chinese](README_zh.md)
 
-Real-time desktop widget showing your OpenAI Codex / ChatGPT quota usage.  
-Pulls data directly from the official `chatgpt.com/backend-api/codex/usage` endpoint.
+A small Windows desktop widget for checking OpenAI Codex / ChatGPT quota usage.
+
+The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.json`, calls the ChatGPT usage endpoint, and shows the 5-hour and 7-day rolling quota windows in a compact Tkinter window.
 
 ![screenshot](screenshot.png)
 
+## What Changed
+
+- Uses `https://chatgpt.com/backend-api/wham/usage` first.
+- Falls back to `https://chatgpt.com/backend-api/codex/usage`.
+- Uses a legacy `codex-cli` User-Agent because the newer Codex usage endpoint can return `403` for some request fingerprints.
+- Shows clearer status labels such as `blocked 403`, `timeout`, `login missing`, and `network error`.
+- Keeps the last successful quota reading visible if a later refresh fails.
+- Writes local diagnostic messages to `codex_quota_overlay.log`.
+- Stores the last successful reading in `codex_quota_overlay_cache.json`.
+- Refreshed the widget layout with a larger card and cleaner spacing.
+
 ## Features
 
-- **Live quota bars** — 5-hour and 7-day rolling windows  
-- **Color-coded** — green (≥50%), yellow (20–49%), red (<20%)  
-- **Auto-refresh** every 30 seconds  
-- **Always-on-top toggle** via right-click menu  
-- **Zero dependencies** — stdlib only (tkinter, json, urllib, threading)  
-- **Windows native** — tiny window, no browser, no Electron  
+- Live 5-hour and 7-day quota bars.
+- Color-coded remaining quota: green, yellow, red.
+- Auto-refresh every 30 seconds.
+- Right-click menu for refresh, always-on-top, opening the log folder, and closing the widget.
+- No third-party Python dependencies.
+- Windows native: tiny Tkinter app, no browser, no Electron.
 
 ## Requirements
 
-- **Windows 10/11**
-- **Python 3.9+** with tkinter (included in the standard Windows Python installer)
-- **Codex Desktop** installed and logged in via ChatGPT
-
-The tool reads your access token from `%USERPROFILE%\.codex\auth.json` — the same file Codex Desktop uses internally. No credentials are ever stored or transmitted elsewhere.
+- Windows 10 or Windows 11.
+- Python 3.9+ with Tkinter.
+- Codex Desktop or Codex CLI logged in with ChatGPT auth.
 
 ## Quick Start
 
-1. Make sure [Codex Desktop](https://codex.openai.com/) is installed and you're logged in.
+1. Make sure Codex is installed and logged in.
 2. Double-click `launch.vbs`.
-
-A small dark window appears in the top-left corner. Right-click for options.
+3. Right-click the widget for options.
 
 ## Manual Run
 
-```bash
+```powershell
 python codex_quota_overlay.py
 ```
 
-Or without the console window:
+Or without a console window:
 
-```bash
+```powershell
 pythonw codex_quota_overlay.py
 ```
 
 ## How It Works
 
-```
-auth.json (local)  →  access_token
-                            ↓
-chatgpt.com/backend-api/codex/usage  →  rate_limit JSON
-                            ↓
-                    tkinter overlay (auto-refresh 30s)
+```text
+%USERPROFILE%\.codex\auth.json
+        -> access token
+        -> chatgpt.com/backend-api/wham/usage
+        -> rate_limit JSON
+        -> Tkinter overlay
 ```
 
-The endpoint returns:
+Example response shape:
 
 ```json
 {
@@ -77,9 +86,9 @@ The endpoint returns:
 
 ## Privacy
 
-- Your access token is read from `auth.json` on disk and used **only** for the single API call to `chatgpt.com/backend-api/codex/usage`.
-- No data is logged, stored, or sent anywhere else.
-- The source is ~250 lines — you can audit it in 5 minutes.
+- The access token is read from the local Codex auth file and sent only to `chatgpt.com` for the usage request.
+- The repository does not include tokens, account email, personal paths, or quota snapshots.
+- Runtime files such as logs and cache are ignored by Git.
 
 ## License
 

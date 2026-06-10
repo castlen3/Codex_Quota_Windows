@@ -20,8 +20,10 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Secrets — NEVER commit these
+# Secrets and local runtime files
 auth.json
 *.token
 .env
 codex_quota_status.json
+codex_quota_overlay.log
+codex_quota_overlay_cache.json

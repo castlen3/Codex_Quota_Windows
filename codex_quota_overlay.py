@@ -1,71 +1,233 @@
 #!/usr/bin/env python
 """
-codex_quota_overlay.py — 桌面小浮窗，每 30 秒更新 Codex quota 剩餘量
+Small desktop overlay for Codex quota status.
+
+The ChatGPT/Codex usage endpoint can occasionally reject or time out even when
+the network is fine, so this widget keeps the last good reading visible and
+shows the real failure type instead of collapsing everything into "offline".
 """
-import json, os, ssl, urllib.request, urllib.error, threading, time
+import json
+import os
+import ssl
+import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
+
 import tkinter as tk
 
-# Windows DPI awareness (optional, best-effort)
+
 try:
     import ctypes
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
     pass
 
-# --- Config ---
+
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".codex", "auth.json")
-USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(SCRIPT_DIR, "codex_quota_overlay.log")
+CACHE_FILE = os.path.join(SCRIPT_DIR, "codex_quota_overlay_cache.json")
+USAGE_URLS = [
+    "https://chatgpt.com/backend-api/wham/usage",
+    "https://chatgpt.com/backend-api/codex/usage",
+]
 REFRESH_SEC = 30
-W = 380; H = 280; PAD = 18; BAR_H = 10
+W = 430
+H = 350
+PAD = 20
+BAR_H = 12
 TOPMOST_DEFAULT = False
 
-# Colors
-BG     = "#10141c"
-FG     = "#e5edf7"
-DIM    = "#9aa4b2"
-MUTED  = "#6f7b8c"
-GREEN  = "#10b981"
-YELLOW = "#f59e0b"
-RED    = "#ef4444"
-BLUE   = "#60a5fa"
 
-# Fonts — positive point sizes for clarity
-FONT_NUM   = ("Segoe UI", 16, "bold")
-FONT_LBL   = ("Segoe UI", 9)
-FONT_META  = ("Segoe UI", 8)
-FONT_TITLE = ("Segoe UI", 10, "bold")
-# -------------
+BG = "#0f1720"
+PANEL = "#131d2a"
+PANEL_2 = "#182434"
+TRACK = "#253247"
+FG = "#edf4ff"
+DIM = "#9aa8ba"
+MUTED = "#6f7f93"
+GREEN = "#2dd4bf"
+YELLOW = "#fbbf24"
+RED = "#fb7185"
+BLUE = "#93c5fd"
+ORANGE = "#f59e0b"
+
+FONT_TITLE = ("Segoe UI", 11, "bold")
+FONT_NUM = ("Segoe UI", 24, "bold")
+FONT_LABEL = ("Segoe UI", 9, "bold")
+FONT_META = ("Segoe UI", 8)
+FONT_FOOTER = ("Segoe UI", 8)
+
+
+class QuotaError(Exception):
+    def __init__(self, status, detail):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def log_error(status, detail):
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {status}: {detail}\n")
+    except Exception:
+        pass
+
 
 def read_token():
-    with open(AUTH_FILE, encoding="utf-8") as f:
-        return json.load(f)["tokens"]["access_token"]
+    try:
+        with open(AUTH_FILE, encoding="utf-8") as f:
+            token = json.load(f).get("tokens", {}).get("access_token")
+    except FileNotFoundError as exc:
+        raise QuotaError("login missing", "Cannot find .codex/auth.json") from exc
+    except Exception as exc:
+        raise QuotaError("login error", f"Cannot read auth file: {exc}") from exc
+
+    if not token:
+        raise QuotaError("login missing", "No access_token in auth.json")
+    return token
+
+
+def fetch_usage_from_url(token, url):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "codex-cli",
+        },
+    )
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode(errors="replace")[:180].replace("\n", " ")
+        except Exception:
+            pass
+        if exc.code in (401, 403):
+            raise QuotaError(f"blocked {exc.code}", body or "Auth rejected") from exc
+        raise QuotaError(f"http {exc.code}", body or "HTTP error") from exc
+    except TimeoutError as exc:
+        raise QuotaError("timeout", "Request timed out") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        raise QuotaError("network error", str(reason)) from exc
+    except json.JSONDecodeError as exc:
+        raise QuotaError("bad response", "Usage endpoint did not return JSON") from exc
+    except Exception as exc:
+        raise QuotaError("read failed", str(exc)) from exc
+
 
 def fetch_usage(token):
-    req = urllib.request.Request(USAGE_URL, headers={
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "CodexCLI/0.137.0",
-    })
-    ctx = ssl.create_default_context()
-    resp = urllib.request.urlopen(req, context=ctx, timeout=10)
-    return json.loads(resp.read().decode())
+    errors = []
+    for url in USAGE_URLS:
+        try:
+            data = fetch_usage_from_url(token, url)
+            data["_source_url"] = url
+            return data
+        except QuotaError as exc:
+            errors.append(f"{url}: {exc.status}")
+            last_error = exc
+    detail = "; ".join(errors)
+    raise QuotaError(last_error.status, detail or last_error.detail)
+
 
 def color_for(pct):
-    if pct >= 50: return GREEN
-    if pct >= 20: return YELLOW
+    if pct >= 50:
+        return GREEN
+    if pct >= 20:
+        return YELLOW
     return RED
 
-def fmt_pct(x):
+
+def fmt_pct(value):
     try:
-        x = float(x)
-        if abs(x - round(x)) < 0.05:
-            return f"{round(x):.0f}%"
-        return f"{x:.1f}%"
+        value = float(value)
     except Exception:
         return "--"
+    if abs(value - round(value)) < 0.05:
+        return f"{round(value):.0f}%"
+    return f"{value:.1f}%"
+
+
+def clamp_pct(value):
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except Exception:
+        return 0.0
+
+
+def time_left(epoch, now):
+    if not epoch:
+        return "--"
+    reset = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    secs = max(0, int((reset - now).total_seconds()))
+    days = secs // 86400
+    hours = (secs % 86400) // 3600
+    mins = (secs % 3600) // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {mins:02d}m"
+    return f"{mins}m"
+
+
+def build_snapshot(data):
+    rl = data.get("rate_limit", {})
+    primary = rl.get("primary_window", {})
+    secondary = rl.get("secondary_window", {})
+    now = datetime.now(timezone.utc)
+
+    pri_used = clamp_pct(primary.get("used_percent", 0))
+    sec_used = clamp_pct(secondary.get("used_percent", 0))
+
+    return {
+        "plan": str(data.get("plan_type") or "?").upper(),
+        "limit_reached": bool(rl.get("limit_reached", False)),
+        "primary": {
+            "remaining": 100 - pri_used,
+            "used": pri_used,
+            "reset": time_left(primary.get("reset_at"), now),
+        },
+        "secondary": {
+            "remaining": 100 - sec_used,
+            "used": sec_used,
+            "reset": time_left(secondary.get("reset_at"), now),
+        },
+        "updated": datetime.now().strftime("%H:%M:%S"),
+        "source": "wham" if "wham" in data.get("_source_url", "") else "codex",
+    }
+
+
+def load_cached_snapshot():
+    try:
+        with open(CACHE_FILE, encoding="utf-8") as f:
+            snapshot = json.load(f)
+        if isinstance(snapshot, dict) and "primary" in snapshot and "secondary" in snapshot:
+            return snapshot
+    except Exception:
+        pass
+    return None
+
+
+def save_cached_snapshot(snapshot):
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception:
+        pass
+
 
 class QuotaOverlay:
     def __init__(self):
+        self.last_snapshot = load_cached_snapshot()
+        self.fetching = False
+
         self.root = tk.Tk()
         self.root.title("Codex Quota")
         self.root.configure(bg=BG)
@@ -73,82 +235,116 @@ class QuotaOverlay:
         self.root.geometry(f"{W}x{H}")
         self.root.attributes("-topmost", TOPMOST_DEFAULT)
 
-        # Right-click menu
         self.topmost_var = tk.BooleanVar(value=TOPMOST_DEFAULT)
-        self.menu = tk.Menu(self.root, tearoff=0, bg=BG, fg=FG,
-                            activebackground="#222a38", activeforeground=FG)
+        self.menu = tk.Menu(
+            self.root,
+            tearoff=0,
+            bg=PANEL,
+            fg=FG,
+            activebackground=PANEL_2,
+            activeforeground=FG,
+        )
         self.menu.add_checkbutton(
             label="Always on top",
             variable=self.topmost_var,
             command=self.toggle_topmost,
         )
         self.menu.add_command(label="Refresh now", command=self.refresh)
+        self.menu.add_command(label="Open log folder", command=self.open_log_folder)
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.root.destroy)
         self.root.bind("<Button-3>", self.show_menu)
 
-        # --- Header ---
-        header = tk.Frame(self.root, bg=BG)
-        header.pack(fill="x", padx=PAD, pady=(12, 0))
-        self.status_dot = tk.Canvas(header, width=8, height=8, bg=BG, highlightthickness=0)
-        self.status_dot.pack(side="left", padx=(0, 6))
-        self.status_label = tk.Label(header, text="active", fg=DIM, bg=BG, font=FONT_META)
-        self.status_label.pack(side="left")
-        self.plan_badge = tk.Label(header, text="", fg=BLUE, bg="#1a2540",
-                                   font=FONT_LBL, padx=10, pady=2)
-        self.plan_badge.pack(side="right")
+        self.card = tk.Frame(self.root, bg=PANEL, bd=0, highlightthickness=1,
+                             highlightbackground="#263246")
+        self.card.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # --- Primary bar ---
-        self.pri_frame = tk.Frame(self.root, bg=BG)
-        self.pri_frame.pack(fill="x", padx=PAD, pady=(12, 0))
-        self.pri_label = tk.Label(self.pri_frame, text="5h remaining", fg=DIM, bg=BG,
-                                  font=FONT_TITLE)
-        self.pri_label.pack(anchor="w")
-        self.pri_val = tk.Label(self.pri_frame, text="--", fg=FG, bg=BG, font=FONT_NUM)
-        self.pri_val.pack(anchor="w", pady=(2, 4))
-        self.pri_canvas = tk.Canvas(self.pri_frame, width=W-2*PAD, height=BAR_H,
-                                    bg=BG, highlightthickness=0)
-        self.pri_canvas.pack(fill="x")
-        meta = tk.Frame(self.pri_frame, bg=BG)
-        meta.pack(fill="x", pady=(4, 0))
-        self.pri_used = tk.Label(meta, text="", fg=MUTED, bg=BG, font=FONT_META)
-        self.pri_used.pack(side="left")
-        self.pri_reset = tk.Label(meta, text="", fg=DIM, bg=BG, font=FONT_META)
-        self.pri_reset.pack(side="right")
-
-        # --- Secondary bar ---
-        self.sec_frame = tk.Frame(self.root, bg=BG)
-        self.sec_frame.pack(fill="x", padx=PAD, pady=(14, 0))
-        self.sec_label = tk.Label(self.sec_frame, text="7d remaining", fg=DIM, bg=BG,
-                                  font=FONT_TITLE)
-        self.sec_label.pack(anchor="w")
-        self.sec_val = tk.Label(self.sec_frame, text="--", fg=FG, bg=BG, font=FONT_NUM)
-        self.sec_val.pack(anchor="w", pady=(2, 4))
-        self.sec_canvas = tk.Canvas(self.sec_frame, width=W-2*PAD, height=BAR_H,
-                                    bg=BG, highlightthickness=0)
-        self.sec_canvas.pack(fill="x")
-        meta2 = tk.Frame(self.sec_frame, bg=BG)
-        meta2.pack(fill="x", pady=(4, 0))
-        self.sec_used = tk.Label(meta2, text="", fg=MUTED, bg=BG, font=FONT_META)
-        self.sec_used.pack(side="left")
-        self.sec_reset = tk.Label(meta2, text="", fg=DIM, bg=BG, font=FONT_META)
-        self.sec_reset.pack(side="right")
-
-        # --- Footer ---
-        self.footer = tk.Label(self.root, text="", fg="#3a4458", bg=BG, font=FONT_META)
-        self.footer.pack(side="bottom", pady=(0, 10))
-
-        # Position at top-left
+        self._build_header()
+        self._build_window_rows()
+        self._build_footer()
         self._place_top_left()
 
+        if self.last_snapshot:
+            self._apply(self.last_snapshot, cached=True)
+
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
-        self.root.after(500, self.refresh)
+        self.root.after(350, self.refresh)
         self.root.mainloop()
 
+    def _build_header(self):
+        header = tk.Frame(self.card, bg=PANEL)
+        header.pack(fill="x", padx=PAD, pady=(16, 8))
+
+        left = tk.Frame(header, bg=PANEL)
+        left.pack(side="left")
+        tk.Label(left, text="Codex Quota", fg=FG, bg=PANEL, font=FONT_TITLE).pack(anchor="w")
+
+        status = tk.Frame(left, bg=PANEL)
+        status.pack(anchor="w", pady=(3, 0))
+        self.status_dot = tk.Canvas(status, width=9, height=9, bg=PANEL, highlightthickness=0)
+        self.status_dot.pack(side="left", padx=(0, 7))
+        self.status_label = tk.Label(status, text="loading", fg=DIM, bg=PANEL, font=FONT_META)
+        self.status_label.pack(side="left")
+
+        self.plan_badge = tk.Label(
+            header,
+            text="--",
+            fg=BLUE,
+            bg="#1d3151",
+            font=FONT_LABEL,
+            padx=12,
+            pady=4,
+        )
+        self.plan_badge.pack(side="right")
+
+    def _build_window_rows(self):
+        self.primary = self._quota_row("5h window", "primary", top_pad=12)
+        self.secondary = self._quota_row("7d window", "secondary", top_pad=16)
+
+    def _quota_row(self, title, name, top_pad=12):
+        row = tk.Frame(self.card, bg=PANEL)
+        row.pack(fill="x", padx=PAD, pady=(top_pad, 0))
+
+        top = tk.Frame(row, bg=PANEL)
+        top.pack(fill="x")
+        tk.Label(top, text=title.upper(), fg=DIM, bg=PANEL, font=FONT_LABEL).pack(side="left")
+        reset = tk.Label(top, text="resets --", fg=MUTED, bg=PANEL, font=FONT_META)
+        reset.pack(side="right")
+
+        val = tk.Label(row, text="--", fg=FG, bg=PANEL, font=FONT_NUM)
+        val.pack(anchor="w", pady=(2, 2))
+
+        canvas = tk.Canvas(row, width=W - 2 * PAD - 20, height=BAR_H, bg=PANEL,
+                           highlightthickness=0)
+        canvas.pack(fill="x")
+
+        meta = tk.Frame(row, bg=PANEL)
+        meta.pack(fill="x", pady=(5, 0))
+        used = tk.Label(meta, text="used --", fg=MUTED, bg=PANEL, font=FONT_META)
+        used.pack(side="left")
+        remaining = tk.Label(meta, text="remaining", fg=MUTED, bg=PANEL, font=FONT_META)
+        remaining.pack(side="right")
+
+        return {
+            "name": name,
+            "value": val,
+            "canvas": canvas,
+            "reset": reset,
+            "used": used,
+            "remaining": remaining,
+        }
+
+    def _build_footer(self):
+        footer = tk.Frame(self.card, bg=PANEL)
+        footer.pack(side="bottom", fill="x", padx=PAD, pady=(8, 14))
+        self.footer = tk.Label(footer, text="starting...", fg=MUTED, bg=PANEL, font=FONT_FOOTER)
+        self.footer.pack(side="left")
+        self.next_refresh = tk.Label(footer, text=f"every {REFRESH_SEC}s", fg=MUTED,
+                                     bg=PANEL, font=FONT_FOOTER)
+        self.next_refresh.pack(side="right")
+
     def _place_top_left(self):
-        margin_x = 24
-        margin_y = 48
-        self.root.geometry(f"{W}x{H}+{margin_x}+{margin_y}")
+        self.root.geometry(f"{W}x{H}+24+48")
 
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
@@ -156,96 +352,103 @@ class QuotaOverlay:
     def toggle_topmost(self):
         self.root.attributes("-topmost", self.topmost_var.get())
 
-    def draw_bar(self, canvas, pct, color, width):
+    def open_log_folder(self):
+        try:
+            os.startfile(SCRIPT_DIR)
+        except Exception:
+            pass
+
+    def draw_dot(self, color):
+        self.status_dot.delete("all")
+        self.status_dot.create_oval(1, 1, 8, 8, fill=color, outline="")
+
+    def draw_bar(self, canvas, pct, color):
         canvas.delete("all")
-        h = BAR_H
-        pct = max(0, min(100, float(pct)))
-        # Track background
-        canvas.create_rectangle(0, 0, width, h, fill="#222a38", outline="")
-        if pct <= 0:
-            return
-        fill_w = max(2, int(pct / 100 * width))
-        canvas.create_rectangle(0, 0, fill_w, h, fill=color, outline="")
+        width = canvas.winfo_width()
+        if width < 20:
+            width = W - 2 * PAD - 20
+        pct = clamp_pct(pct)
+        fill_w = int(pct / 100 * width)
+        canvas.create_rectangle(0, 0, width, BAR_H, fill=TRACK, outline="")
+        if fill_w > 0:
+            canvas.create_rectangle(0, 0, max(3, fill_w), BAR_H, fill=color, outline="")
 
     def refresh(self):
-        t = threading.Thread(target=self._fetch, daemon=True)
-        t.start()
+        if self.fetching:
+            return
+        self.fetching = True
+        self.footer.config(text="refreshing...")
+        try:
+            threading.Thread(target=self._fetch, daemon=True).start()
+        except Exception as exc:
+            self.fetching = False
+            log_error("thread start failed", str(exc))
+            self._show_error("thread failed")
 
     def _fetch(self):
         try:
             token = read_token()
-            data = fetch_usage(token)
-            rl = data.get("rate_limit", {})
-            p = rl.get("primary_window", {})
-            s = rl.get("secondary_window", {})
+            snapshot = build_snapshot(fetch_usage(token))
+            self.root.after(0, lambda: self._apply(snapshot))
+        except QuotaError as exc:
+            log_error(exc.status, exc.detail)
+            status = exc.status
+            self.root.after(0, lambda status=status: self._show_error(status))
+        except Exception as exc:
+            detail = str(exc) or exc.__class__.__name__
+            log_error("unexpected", detail)
+            self.root.after(0, lambda: self._show_error("read failed"))
+        finally:
+            self.root.after(0, self._finish_fetch)
+            self.root.after(REFRESH_SEC * 1000, self.refresh)
 
-            pri_rem = 100 - p.get("used_percent", 0)
-            sec_rem = 100 - s.get("used_percent", 0)
-            now = datetime.now(timezone.utc)
+    def _finish_fetch(self):
+        self.fetching = False
 
-            def t_left(epoch):
-                if not epoch: return "--"
-                dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
-                secs = (dt - now).total_seconds()
-                h, m = int(secs // 3600), int((secs % 3600) // 60)
-                return f"{h}h{m:02d}" if h > 0 else f"{m}m"
+    def _apply(self, snapshot, cached=False):
+        self.last_snapshot = snapshot
+        if not cached:
+            save_cached_snapshot(snapshot)
+        self.plan_badge.config(text=snapshot["plan"])
 
-            pri_reset_str = t_left(p.get("reset_at"))
-            sec_reset_str = t_left(s.get("reset_at"))
-            limit_hit = rl.get("limit_reached", False)
-            plan = data.get("plan_type", "?").upper()
-            now_str = datetime.now().strftime("%H:%M:%S")
-
-            self.root.after(0, lambda: self._apply(
-                pri_rem, sec_rem, p.get("used_percent", 0), s.get("used_percent", 0),
-                pri_reset_str, sec_reset_str, limit_hit, plan, now_str,
-            ))
-        except Exception:
-            self.root.after(0, lambda: self._show_error())
-
-        self.root.after(REFRESH_SEC * 1000, self.refresh)
-
-    def _apply(self, pri_rem, sec_rem, pri_used, sec_used,
-               pri_reset, sec_reset, limit_hit, plan, updated):
-        # Status
-        if limit_hit:
-            self.status_dot.delete("all")
-            self.status_dot.create_oval(1, 1, 7, 7, fill=RED, outline="")
+        if snapshot["limit_reached"]:
+            self.draw_dot(RED)
             self.status_label.config(text="limited", fg=RED)
         else:
-            self.status_dot.delete("all")
-            self.status_dot.create_oval(1, 1, 7, 7, fill=GREEN, outline="")
-            self.status_label.config(text="active", fg=DIM)
+            self.draw_dot(GREEN)
+            self.status_label.config(text="cached" if cached else "live", fg=DIM)
 
-        self.plan_badge.config(text=plan)
+        self._apply_row(self.primary, snapshot["primary"])
+        self._apply_row(self.secondary, snapshot["secondary"])
+        prefix = "cached" if cached else "updated"
+        source = snapshot.get("source", "api")
+        self.footer.config(text=f"{prefix} {snapshot['updated']} via {source}")
 
-        # Primary
-        c1 = color_for(pri_rem)
-        self.pri_val.config(text=fmt_pct(pri_rem), fg=c1)
-        w = self.pri_canvas.winfo_width()
-        if w < 10: w = W - 2*PAD
-        self.draw_bar(self.pri_canvas, pri_rem, c1, w)
-        self.pri_used.config(text=f"used {fmt_pct(pri_used)}")
-        self.pri_reset.config(text=f"↻ {pri_reset}")
+    def _apply_row(self, row, data):
+        remaining = data["remaining"]
+        color = color_for(remaining)
+        row["value"].config(text=fmt_pct(remaining), fg=color)
+        row["reset"].config(text=f"resets in {data['reset']}")
+        row["used"].config(text=f"used {fmt_pct(data['used'])}")
+        row["remaining"].config(text="remaining")
+        self.draw_bar(row["canvas"], remaining, color)
 
-        # Secondary
-        c2 = color_for(sec_rem)
-        self.sec_val.config(text=fmt_pct(sec_rem), fg=c2)
-        w = self.sec_canvas.winfo_width()
-        if w < 10: w = W - 2*PAD
-        self.draw_bar(self.sec_canvas, sec_rem, c2, w)
-        self.sec_used.config(text=f"used {fmt_pct(sec_used)}")
-        self.sec_reset.config(text=f"↻ {sec_reset}")
+    def _show_error(self, status):
+        display = status
+        color = ORANGE
+        if "401" in status or "403" in status or status.startswith("login"):
+            color = RED
+        elif status == "timeout":
+            color = YELLOW
 
-        self.footer.config(text=f"updated {updated} · {REFRESH_SEC}s")
+        self.draw_dot(color)
+        self.status_label.config(text=display, fg=color)
 
-    def _show_error(self):
-        self.status_dot.delete("all")
-        self.status_dot.create_oval(1, 1, 7, 7, fill=RED, outline="")
-        self.status_label.config(text="offline", fg=RED)
-        self.pri_val.config(text="--", fg=MUTED)
-        self.sec_val.config(text="--", fg=MUTED)
-        self.footer.config(text="retrying in 30s…")
+        if self.last_snapshot:
+            self.footer.config(text=f"last good {self.last_snapshot['updated']} - retrying")
+        else:
+            self.footer.config(text=f"{display} - retrying")
+
 
 if __name__ == "__main__":
     QuotaOverlay()
