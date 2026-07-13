@@ -24,6 +24,8 @@ The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.j
 ## Features
 
 - Live weekly quota bar.
+- Expected-remaining marker based on an even 14.3% daily pace.
+- `Ahead`, `On pace`, or `Over pace` guidance at a glance.
 - Color-coded remaining quota: green, yellow, red.
 - Auto-refresh every 30 seconds.
 - Right-click menu for refresh, always-on-top, opening the log folder, and closing the widget.
@@ -81,6 +83,10 @@ Example response shape:
   }
 }
 ```
+
+The thin marker on the quota bar shows how much quota would remain if usage
+were spread evenly across the seven-day window. This is a pace guide, not a
+separate daily limit; unused quota remains available for the rest of the week.
 
 ## Privacy
 
