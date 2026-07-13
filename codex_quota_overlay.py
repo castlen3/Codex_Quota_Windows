@@ -34,7 +34,7 @@ USAGE_URLS = [
 ]
 REFRESH_SEC = 30
 W = 430
-H = 350
+H = 265
 PAD = 20
 BAR_H = 12
 TOPMOST_DEFAULT = False
@@ -179,25 +179,30 @@ def time_left(epoch, now):
 
 def build_snapshot(data):
     rl = data.get("rate_limit", {})
-    primary = rl.get("primary_window", {})
-    secondary = rl.get("secondary_window", {})
-    now = datetime.now(timezone.utc)
+    windows = [
+        window
+        for window in (
+            rl.get("weekly_window"),
+            rl.get("primary_window"),
+            rl.get("secondary_window"),
+        )
+        if isinstance(window, dict) and window
+    ]
+    if not windows:
+        raise QuotaError("bad response", "Usage response has no quota window")
 
-    pri_used = clamp_pct(primary.get("used_percent", 0))
-    sec_used = clamp_pct(secondary.get("used_percent", 0))
+    weekly = max(windows, key=lambda window: window.get("limit_window_seconds") or 0)
+    now = datetime.now(timezone.utc)
+    used = clamp_pct(weekly.get("used_percent", 0))
 
     return {
         "plan": str(data.get("plan_type") or "?").upper(),
+        "quota_mode": "weekly",
         "limit_reached": bool(rl.get("limit_reached", False)),
-        "primary": {
-            "remaining": 100 - pri_used,
-            "used": pri_used,
-            "reset": time_left(primary.get("reset_at"), now),
-        },
-        "secondary": {
-            "remaining": 100 - sec_used,
-            "used": sec_used,
-            "reset": time_left(secondary.get("reset_at"), now),
+        "weekly": {
+            "remaining": 100 - used,
+            "used": used,
+            "reset": time_left(weekly.get("reset_at"), now),
         },
         "updated": datetime.now().strftime("%H:%M:%S"),
         "source": "wham" if "wham" in data.get("_source_url", "") else "codex",
@@ -208,7 +213,7 @@ def load_cached_snapshot():
     try:
         with open(CACHE_FILE, encoding="utf-8") as f:
             snapshot = json.load(f)
-        if isinstance(snapshot, dict) and "primary" in snapshot and "secondary" in snapshot:
+        if isinstance(snapshot, dict) and snapshot.get("quota_mode") == "weekly" and "weekly" in snapshot:
             return snapshot
     except Exception:
         pass
@@ -277,7 +282,7 @@ class QuotaOverlay:
 
         left = tk.Frame(header, bg=PANEL)
         left.pack(side="left")
-        tk.Label(left, text="Codex Quota", fg=FG, bg=PANEL, font=FONT_TITLE).pack(anchor="w")
+        tk.Label(left, text="Codex Weekly Quota", fg=FG, bg=PANEL, font=FONT_TITLE).pack(anchor="w")
 
         status = tk.Frame(left, bg=PANEL)
         status.pack(anchor="w", pady=(3, 0))
@@ -298,8 +303,7 @@ class QuotaOverlay:
         self.plan_badge.pack(side="right")
 
     def _build_window_rows(self):
-        self.primary = self._quota_row("5h window", "primary", top_pad=12)
-        self.secondary = self._quota_row("7d window", "secondary", top_pad=16)
+        self.weekly = self._quota_row("Weekly quota", "weekly", top_pad=16)
 
     def _quota_row(self, title, name, top_pad=12):
         row = tk.Frame(self.card, bg=PANEL)
@@ -418,8 +422,7 @@ class QuotaOverlay:
             self.draw_dot(GREEN)
             self.status_label.config(text="cached" if cached else "live", fg=DIM)
 
-        self._apply_row(self.primary, snapshot["primary"])
-        self._apply_row(self.secondary, snapshot["secondary"])
+        self._apply_row(self.weekly, snapshot["weekly"])
         prefix = "cached" if cached else "updated"
         source = snapshot.get("source", "api")
         self.footer.config(text=f"{prefix} {snapshot['updated']} via {source}")

@@ -4,12 +4,14 @@
 
 這是一個 Windows 桌面小工具，用來顯示 OpenAI Codex / ChatGPT 的 quota 使用狀態。
 
-它會讀取本機 Codex OAuth token，也就是 `%USERPROFILE%\.codex\auth.json`，呼叫 ChatGPT usage endpoint，然後用小型 Tkinter 浮窗顯示 5 小時與 7 天 rolling quota。
-
-![screenshot](screenshot.png)
+它會讀取本機 Codex OAuth token，也就是 `%USERPROFILE%\.codex\auth.json`，呼叫 ChatGPT usage endpoint，然後用小型 Tkinter 浮窗顯示目前的週額度。
 
 ## 這版更新
 
+- 配合 Codex 改成只有週額度的新版格式。
+- API 只有一個 7 天 `primary_window` 時，會正確視為週額度。
+- 若 API 日後改用明確的 `weekly_window` 名稱也能支援。
+- 舊版雙額度快取會自動作廢，避免顯示過期的 5 小時資料。
 - 優先使用 `https://chatgpt.com/backend-api/wham/usage`。
 - `https://chatgpt.com/backend-api/codex/usage` 改為備援。
 - User-Agent 改為 `codex-cli`，避免新版 Codex usage endpoint 在某些請求指紋下回傳 `403`。
@@ -17,11 +19,11 @@
 - 如果更新失敗，會保留上一筆成功讀到的 quota，不會整個變成空白。
 - 本機診斷訊息會寫入 `codex_quota_overlay.log`。
 - 上一筆成功讀取結果會快取在 `codex_quota_overlay_cache.json`。
-- 視窗改成較大的卡片版面，底部不會被截掉。
+- 視窗改為較短的單一週額度橫條版面。
 
 ## 功能
 
-- 即時顯示 5 小時與 7 天 quota。
+- 即時顯示週額度。
 - 依剩餘比例用綠色、黃色、紅色顯示。
 - 每 30 秒自動更新。
 - 右鍵選單支援重新整理、永遠置頂、開啟 log 資料夾、關閉。
@@ -71,15 +73,11 @@ API 回傳格式大致如下：
     "allowed": true,
     "limit_reached": false,
     "primary_window": {
-      "used_percent": 35,
-      "limit_window_seconds": 18000,
-      "reset_at": 1781022613
-    },
-    "secondary_window": {
       "used_percent": 28,
       "limit_window_seconds": 604800,
       "reset_at": 1781188385
-    }
+    },
+    "secondary_window": null
   }
 }
 ```
