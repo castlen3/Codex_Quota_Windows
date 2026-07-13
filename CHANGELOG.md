@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Updated the parser and UI for the weekly-only Codex quota format.
+- Added support for a single 7-day `primary_window` and an explicit `weekly_window`.
+- Invalidated legacy two-window cache data and replaced the 5-hour/7-day rows with one weekly quota bar.
 - Switched the primary usage endpoint to `https://chatgpt.com/backend-api/wham/usage`.
 - Kept `https://chatgpt.com/backend-api/codex/usage` as a fallback endpoint.
 - Changed the usage request User-Agent to `codex-cli` to avoid `403` responses seen with newer request fingerprints.

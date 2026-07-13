@@ -4,12 +4,14 @@
 
 A small Windows desktop widget for checking OpenAI Codex / ChatGPT quota usage.
 
-The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.json`, calls the ChatGPT usage endpoint, and shows the 5-hour and 7-day rolling quota windows in a compact Tkinter window.
-
-![screenshot](screenshot.png)
+The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.json`, calls the ChatGPT usage endpoint, and shows the current weekly quota in a compact Tkinter window.
 
 ## What Changed
 
+- Updated for the weekly-only Codex quota format.
+- Treats a single 7-day `primary_window` as the canonical weekly quota.
+- Also supports an explicit `weekly_window` if the API adopts that name.
+- Ignores old two-window cache files instead of displaying stale 5-hour data.
 - Uses `https://chatgpt.com/backend-api/wham/usage` first.
 - Falls back to `https://chatgpt.com/backend-api/codex/usage`.
 - Uses a legacy `codex-cli` User-Agent because the newer Codex usage endpoint can return `403` for some request fingerprints.
@@ -17,11 +19,11 @@ The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.j
 - Keeps the last successful quota reading visible if a later refresh fails.
 - Writes local diagnostic messages to `codex_quota_overlay.log`.
 - Stores the last successful reading in `codex_quota_overlay_cache.json`.
-- Refreshed the widget layout with a larger card and cleaner spacing.
+- Uses a shorter single-bar layout for the weekly-only quota.
 
 ## Features
 
-- Live 5-hour and 7-day quota bars.
+- Live weekly quota bar.
 - Color-coded remaining quota: green, yellow, red.
 - Auto-refresh every 30 seconds.
 - Right-click menu for refresh, always-on-top, opening the log folder, and closing the widget.
@@ -71,15 +73,11 @@ Example response shape:
     "allowed": true,
     "limit_reached": false,
     "primary_window": {
-      "used_percent": 35,
-      "limit_window_seconds": 18000,
-      "reset_at": 1781022613
-    },
-    "secondary_window": {
       "used_percent": 28,
       "limit_window_seconds": 604800,
       "reset_at": 1781188385
-    }
+    },
+    "secondary_window": null
   }
 }
 ```
