@@ -10,6 +10,7 @@ import json
 import os
 import ssl
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -162,6 +163,48 @@ def clamp_pct(value):
         return 0.0
 
 
+def quota_pace(window, now_epoch=None):
+    """Compare actual remaining quota with an even-use pace for the window."""
+    reset_at = window.get("reset_at")
+    if reset_at is None:
+        return None
+
+    try:
+        window_seconds = max(1.0, float(window.get("limit_window_seconds") or 604800))
+        now = time.time() if now_epoch is None else float(now_epoch)
+        remaining_seconds = max(0.0, min(window_seconds, float(reset_at) - now))
+        used = clamp_pct(window.get("used_percent", 0))
+    except (TypeError, ValueError):
+        return None
+
+    expected = remaining_seconds / window_seconds * 100
+    delta = (100 - used) - expected
+    if abs(delta) < 1:
+        status = "on_pace"
+    elif delta > 0:
+        status = "ahead"
+    else:
+        status = "over"
+
+    return {
+        "expected_remaining": round(expected, 1),
+        "delta": round(delta, 1),
+        "status": status,
+        "daily_percent": round(86400 / window_seconds * 100, 1),
+    }
+
+
+def pace_text(pace):
+    if not pace:
+        return "Pace unavailable"
+    delta = round(abs(pace.get("delta", 0)))
+    if pace.get("status") == "ahead":
+        return f"Ahead {delta}%"
+    if pace.get("status") == "over":
+        return f"Over pace {delta}%"
+    return "On pace"
+
+
 def time_left(epoch, now):
     if not epoch:
         return "--"
@@ -203,6 +246,7 @@ def build_snapshot(data):
             "remaining": 100 - used,
             "used": used,
             "reset": time_left(weekly.get("reset_at"), now),
+            "pace": quota_pace(weekly),
         },
         "updated": datetime.now().strftime("%H:%M:%S"),
         "source": "wham" if "wham" in data.get("_source_url", "") else "codex",
@@ -324,18 +368,18 @@ class QuotaOverlay:
 
         meta = tk.Frame(row, bg=PANEL)
         meta.pack(fill="x", pady=(5, 0))
-        used = tk.Label(meta, text="used --", fg=MUTED, bg=PANEL, font=FONT_META)
-        used.pack(side="left")
-        remaining = tk.Label(meta, text="remaining", fg=MUTED, bg=PANEL, font=FONT_META)
-        remaining.pack(side="right")
+        pace = tk.Label(meta, text="Pace unavailable", fg=MUTED, bg=PANEL, font=FONT_META)
+        pace.pack(side="left")
+        daily = tk.Label(meta, text="Daily pace --", fg=MUTED, bg=PANEL, font=FONT_META)
+        daily.pack(side="right")
 
         return {
             "name": name,
             "value": val,
             "canvas": canvas,
             "reset": reset,
-            "used": used,
-            "remaining": remaining,
+            "pace": pace,
+            "daily": daily,
         }
 
     def _build_footer(self):
@@ -366,7 +410,7 @@ class QuotaOverlay:
         self.status_dot.delete("all")
         self.status_dot.create_oval(1, 1, 8, 8, fill=color, outline="")
 
-    def draw_bar(self, canvas, pct, color):
+    def draw_bar(self, canvas, pct, color, pace=None):
         canvas.delete("all")
         width = canvas.winfo_width()
         if width < 20:
@@ -376,6 +420,20 @@ class QuotaOverlay:
         canvas.create_rectangle(0, 0, width, BAR_H, fill=TRACK, outline="")
         if fill_w > 0:
             canvas.create_rectangle(0, 0, max(3, fill_w), BAR_H, fill=color, outline="")
+        if pace:
+            expected = clamp_pct(pace.get("expected_remaining", 0))
+            marker_x = max(1, min(width - 2, int(expected / 100 * width)))
+            marker_color = GREEN
+            if pace.get("status") == "over":
+                marker_color = RED if pace.get("delta", 0) < -10 else YELLOW
+            canvas.create_rectangle(
+                marker_x - 1,
+                0,
+                marker_x + 1,
+                BAR_H,
+                fill=marker_color,
+                outline="",
+            )
 
     def refresh(self):
         if self.fetching:
@@ -430,11 +488,16 @@ class QuotaOverlay:
     def _apply_row(self, row, data):
         remaining = data["remaining"]
         color = color_for(remaining)
+        pace = data.get("pace")
         row["value"].config(text=fmt_pct(remaining), fg=color)
         row["reset"].config(text=f"resets in {data['reset']}")
-        row["used"].config(text=f"used {fmt_pct(data['used'])}")
-        row["remaining"].config(text="remaining")
-        self.draw_bar(row["canvas"], remaining, color)
+        pace_color = GREEN
+        if pace and pace.get("status") == "over":
+            pace_color = RED if pace.get("delta", 0) < -10 else YELLOW
+        row["pace"].config(text=pace_text(pace), fg=pace_color if pace else MUTED)
+        daily = pace.get("daily_percent") if pace else "--"
+        row["daily"].config(text=f"Daily pace {daily}%")
+        self.draw_bar(row["canvas"], remaining, color, pace)
 
     def _show_error(self, status):
         display = status

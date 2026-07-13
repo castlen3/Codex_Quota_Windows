@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added an expected-remaining marker based on an even 14.3% daily pace.
+- Added `Ahead`, `On pace`, and `Over pace` status to the weekly quota row.
 - Updated the parser and UI for the weekly-only Codex quota format.
 - Added support for a single 7-day `primary_window` and an explicit `weekly_window`.
 - Invalidated legacy two-window cache data and replaced the 5-hour/7-day rows with one weekly quota bar.
