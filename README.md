@@ -4,14 +4,19 @@
 
 A small Windows desktop widget for checking OpenAI Codex / ChatGPT quota usage.
 
-The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.json`, calls the ChatGPT usage endpoint, and shows the current weekly quota in a compact Tkinter window.
+The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.json`, calls the ChatGPT usage endpoint, and shows the current 5-hour and weekly quotas in a compact Tkinter window.
 
 ## What Changed
 
-- Updated for the weekly-only Codex quota format.
-- Treats a single 7-day `primary_window` as the canonical weekly quota.
-- Also supports an explicit `weekly_window` if the API adopts that name.
-- Ignores old two-window cache files instead of displaying stale 5-hour data.
+- Updated for the restored two-window Codex quota format (5-hour + weekly).
+- Shows both quota windows in one window: 5-hour on top, weekly below.
+- Treats `primary_window` as the 5-hour quota and `secondary_window` as the weekly quota.
+- Falls back to the largest available window when the weekly window is missing, without duplicating the same window twice.
+- Added a full-height pace tick on each quota bar: where usage *should* be right now.
+  - Green tick = ahead of pace (using less than expected).
+  - White tick = on pace.
+  - Yellow/red tick = over pace (using more than expected).
+- The 5-hour row hides the daily-pace label because a daily pace is not meaningful for a 5-hour window.
 - Uses `https://chatgpt.com/backend-api/wham/usage` first.
 - Falls back to `https://chatgpt.com/backend-api/codex/usage`.
 - Uses a legacy `codex-cli` User-Agent because the newer Codex usage endpoint can return `403` for some request fingerprints.
@@ -19,12 +24,12 @@ The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.j
 - Keeps the last successful quota reading visible if a later refresh fails.
 - Writes local diagnostic messages to `codex_quota_overlay.log`.
 - Stores the last successful reading in `codex_quota_overlay_cache.json`.
-- Uses a shorter single-bar layout for the weekly-only quota.
+- `launch.vbs` prefers a local Python 3.12 install (`%LocalAppData%\Programs\Python\Python312`) and falls back to `PATH`.
 
 ## Features
 
-- Live weekly quota bar.
-- Expected-remaining marker based on an even 14.3% daily pace.
+- Live 5-hour and weekly quota bars in one compact window.
+- Full-height pace tick showing where usage should be right now.
 - `Ahead`, `On pace`, or `Over pace` guidance at a glance.
 - Color-coded remaining quota: green, yellow, red.
 - Auto-refresh every 30 seconds.
@@ -75,18 +80,23 @@ Example response shape:
     "allowed": true,
     "limit_reached": false,
     "primary_window": {
-      "used_percent": 28,
-      "limit_window_seconds": 604800,
+      "used_percent": 0,
+      "limit_window_seconds": 18000,
       "reset_at": 1781188385
     },
-    "secondary_window": null
+    "secondary_window": {
+      "used_percent": 34,
+      "limit_window_seconds": 604800,
+      "reset_at": 1781188385
+    }
   }
 }
 ```
 
-The thin marker on the quota bar shows how much quota would remain if usage
-were spread evenly across the seven-day window. This is a pace guide, not a
-separate daily limit; unused quota remains available for the rest of the week.
+`primary_window` is the 5-hour quota and `secondary_window` is the weekly
+quota. The full-height tick on each bar shows how much quota would remain if
+usage were spread evenly across that window. This is a pace guide, not a
+separate limit; unused quota remains available until the window resets.
 
 ## Privacy
 

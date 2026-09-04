@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Restored the two-window Codex quota layout (5-hour + weekly) in a single window.
+- `primary_window` is shown as the 5-hour quota and `secondary_window` as the weekly quota.
+- Falls back to the largest available window when the weekly window is missing, without duplicating the same window twice.
+- Added a full-height pace tick on each quota bar (green = ahead, white = on pace, yellow/red = over pace).
+- The 5-hour row hides the daily-pace label (not meaningful for a 5-hour window).
+- `launch.vbs` prefers a local Python 3.12 install and falls back to `PATH`.
+- Regenerated the screenshot for the dual-window layout.
+- Updated English and Traditional Chinese READMEs for the dual-window format.
+
+## Previously (weekly-only)
+
 - Added an expected-remaining marker based on an even 14.3% daily pace.
 - Added `Ahead`, `On pace`, and `Over pace` status to the weekly quota row.
 - Updated the parser and UI for the weekly-only Codex quota format.

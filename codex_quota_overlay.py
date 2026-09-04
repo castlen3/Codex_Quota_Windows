@@ -6,6 +6,7 @@ The ChatGPT/Codex usage endpoint can occasionally reject or time out even when
 the network is fine, so this widget keeps the last good reading visible and
 shows the real failure type instead of collapsing everything into "offline".
 """
+import base64
 import json
 import os
 import ssl
@@ -26,6 +27,8 @@ except Exception:
 
 
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".codex", "auth.json")
+TOKEN_REFRESH_URL = "https://auth.openai.com/oauth/token"
+CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "codex_quota_overlay.log")
 CACHE_FILE = os.path.join(SCRIPT_DIR, "codex_quota_overlay_cache.json")
@@ -35,9 +38,12 @@ USAGE_URLS = [
 ]
 REFRESH_SEC = 30
 W = 430
-H = 265
+H = 448
 PAD = 20
 BAR_H = 12
+TICK_H = 20
+WEEKLY_MIN_SECONDS = 6 * 24 * 60 * 60
+FIVE_HOUR_MAX_SECONDS = 24 * 60 * 60
 TOPMOST_DEFAULT = False
 
 
@@ -77,14 +83,95 @@ def log_error(status, detail):
         pass
 
 
-def read_token():
+def is_jwt_expired(token, buffer_sec=300):
     try:
-        with open(AUTH_FILE, encoding="utf-8") as f:
-            token = json.load(f).get("tokens", {}).get("access_token")
+        parts = token.split(".")
+        if len(parts) != 3:
+            return False
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")))
+        exp = payload.get("exp")
+        if exp and isinstance(exp, (int, float)):
+            return time.time() + buffer_sec >= exp
+    except Exception:
+        pass
+    return False
+
+
+def refresh_access_token():
+    try:
+        with open(AUTH_FILE, "r", encoding="utf-8") as f:
+            auth_data = json.load(f)
     except FileNotFoundError as exc:
         raise QuotaError("login missing", "Cannot find .codex/auth.json") from exc
     except Exception as exc:
         raise QuotaError("login error", f"Cannot read auth file: {exc}") from exc
+
+    tokens = auth_data.get("tokens", {})
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        raise QuotaError("login missing", "No refresh_token in auth.json")
+
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "refresh_token": refresh_token,
+    }
+    req = urllib.request.Request(
+        TOKEN_REFRESH_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+            token_resp = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode(errors="replace")[:180].replace("\n", " ")
+        except Exception:
+            pass
+        raise QuotaError(f"refresh {exc.code}", body or "Token refresh rejected") from exc
+    except Exception as exc:
+        raise QuotaError("refresh failed", str(exc)) from exc
+
+    new_access_token = token_resp.get("access_token")
+    if not new_access_token:
+        raise QuotaError("refresh failed", "No access_token in refresh response")
+
+    tokens["access_token"] = new_access_token
+    if "id_token" in token_resp:
+        tokens["id_token"] = token_resp["id_token"]
+    if "refresh_token" in token_resp:
+        tokens["refresh_token"] = token_resp["refresh_token"]
+
+    auth_data["tokens"] = tokens
+    auth_data["last_refresh"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    try:
+        tmp_file = AUTH_FILE + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(auth_data, f, indent=2)
+        os.replace(tmp_file, AUTH_FILE)
+    except Exception as exc:
+        log_error("save auth failed", str(exc))
+
+    return new_access_token
+
+
+def read_token(force_refresh=False):
+    try:
+        with open(AUTH_FILE, encoding="utf-8") as f:
+            tokens = json.load(f).get("tokens", {})
+            token = tokens.get("access_token")
+    except FileNotFoundError as exc:
+        raise QuotaError("login missing", "Cannot find .codex/auth.json") from exc
+    except Exception as exc:
+        raise QuotaError("login error", f"Cannot read auth file: {exc}") from exc
+
+    if not token or force_refresh or is_jwt_expired(token):
+        token = refresh_access_token()
 
     if not token:
         raise QuotaError("login missing", "No access_token in auth.json")
@@ -126,12 +213,24 @@ def fetch_usage_from_url(token, url):
 
 def fetch_usage(token):
     errors = []
+    refreshed = False
     for url in USAGE_URLS:
         try:
             data = fetch_usage_from_url(token, url)
             data["_source_url"] = url
             return data
         except QuotaError as exc:
+            if not refreshed and ("401" in exc.status or "403" in exc.status or "blocked" in exc.status):
+                try:
+                    token = refresh_access_token()
+                    refreshed = True
+                    data = fetch_usage_from_url(token, url)
+                    data["_source_url"] = url
+                    return data
+                except QuotaError as ref_exc:
+                    errors.append(f"{url}: {ref_exc.status}")
+                    last_error = ref_exc
+                    continue
             errors.append(f"{url}: {exc.status}")
             last_error = exc
     detail = "; ".join(errors)
@@ -194,6 +293,36 @@ def quota_pace(window, now_epoch=None):
     }
 
 
+def window_seconds(window):
+    try:
+        return float(window.get("limit_window_seconds") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def window_label(seconds):
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return "window"
+    if seconds >= 86400:
+        return f"{seconds / 86400:.0f}d window"
+    if seconds >= 3600:
+        return f"{seconds / 3600:.0f}h window"
+    return f"{seconds / 60:.0f}m window"
+
+
+def window_data(window, now):
+    used = clamp_pct(window.get("used_percent", 0))
+    return {
+        "remaining": 100 - used,
+        "used": used,
+        "reset": time_left(window.get("reset_at"), now),
+        "pace": quota_pace(window),
+        "seconds": window_seconds(window),
+    }
+
+
 def pace_text(pace):
     if not pace:
         return "Pace unavailable"
@@ -222,32 +351,38 @@ def time_left(epoch, now):
 
 def build_snapshot(data):
     rl = data.get("rate_limit", {})
+    now = datetime.now(timezone.utc)
     windows = [
         window
-        for window in (
-            rl.get("weekly_window"),
-            rl.get("primary_window"),
-            rl.get("secondary_window"),
-        )
+        for window in (rl.get("primary_window"), rl.get("secondary_window"))
         if isinstance(window, dict) and window
     ]
-    if not windows:
-        raise QuotaError("bad response", "Usage response has no quota window")
 
-    weekly = max(windows, key=lambda window: window.get("limit_window_seconds") or 0)
-    now = datetime.now(timezone.utc)
-    used = clamp_pct(weekly.get("used_percent", 0))
+    five_hour = None
+    weekly = None
+    for window in windows:
+        seconds = window_seconds(window)
+        if seconds and seconds < WEEKLY_MIN_SECONDS and seconds <= FIVE_HOUR_MAX_SECONDS:
+            if five_hour is None or seconds < window_seconds(five_hour):
+                five_hour = window
+        elif seconds >= WEEKLY_MIN_SECONDS:
+            if weekly is None or seconds > window_seconds(weekly):
+                weekly = window
+
+    if weekly is None:
+        # No 7d window: fall back to the largest window so the widget still works.
+        if not windows:
+            raise QuotaError("bad response", "Usage response has no quota window")
+        weekly = max(windows, key=window_seconds)
+        if weekly is five_hour:
+            five_hour = None  # don't show the same window in both rows
 
     return {
         "plan": str(data.get("plan_type") or "?").upper(),
-        "quota_mode": "weekly",
+        "quota_mode": "dual",
         "limit_reached": bool(rl.get("limit_reached", False)),
-        "weekly": {
-            "remaining": 100 - used,
-            "used": used,
-            "reset": time_left(weekly.get("reset_at"), now),
-            "pace": quota_pace(weekly),
-        },
+        "five_hour": window_data(five_hour, now) if five_hour else None,
+        "weekly": window_data(weekly, now),
         "updated": datetime.now().strftime("%H:%M:%S"),
         "source": "wham" if "wham" in data.get("_source_url", "") else "codex",
     }
@@ -257,7 +392,7 @@ def load_cached_snapshot():
     try:
         with open(CACHE_FILE, encoding="utf-8") as f:
             snapshot = json.load(f)
-        if isinstance(snapshot, dict) and snapshot.get("quota_mode") == "weekly" and "weekly" in snapshot:
+        if isinstance(snapshot, dict) and snapshot.get("quota_mode") in ("dual", "weekly") and "weekly" in snapshot:
             return snapshot
     except Exception:
         pass
@@ -326,7 +461,7 @@ class QuotaOverlay:
 
         left = tk.Frame(header, bg=PANEL)
         left.pack(side="left")
-        tk.Label(left, text="Codex Weekly Quota", fg=FG, bg=PANEL, font=FONT_TITLE).pack(anchor="w")
+        tk.Label(left, text="Codex Quota", fg=FG, bg=PANEL, font=FONT_TITLE).pack(anchor="w")
 
         status = tk.Frame(left, bg=PANEL)
         status.pack(anchor="w", pady=(3, 0))
@@ -347,7 +482,8 @@ class QuotaOverlay:
         self.plan_badge.pack(side="right")
 
     def _build_window_rows(self):
-        self.weekly = self._quota_row("Weekly quota", "weekly", top_pad=16)
+        self.five_hour = self._quota_row("5h quota", "five_hour", top_pad=16)
+        self.weekly = self._quota_row("Weekly quota", "weekly", top_pad=14)
 
     def _quota_row(self, title, name, top_pad=12):
         row = tk.Frame(self.card, bg=PANEL)
@@ -362,7 +498,7 @@ class QuotaOverlay:
         val = tk.Label(row, text="--", fg=FG, bg=PANEL, font=FONT_NUM)
         val.pack(anchor="w", pady=(2, 2))
 
-        canvas = tk.Canvas(row, width=W - 2 * PAD - 20, height=BAR_H, bg=PANEL,
+        canvas = tk.Canvas(row, width=W - 2 * PAD - 20, height=TICK_H, bg=PANEL,
                            highlightthickness=0)
         canvas.pack(fill="x")
 
@@ -370,8 +506,11 @@ class QuotaOverlay:
         meta.pack(fill="x", pady=(5, 0))
         pace = tk.Label(meta, text="Pace unavailable", fg=MUTED, bg=PANEL, font=FONT_META)
         pace.pack(side="left")
-        daily = tk.Label(meta, text="Daily pace --", fg=MUTED, bg=PANEL, font=FONT_META)
-        daily.pack(side="right")
+        if name == "weekly":
+            daily = tk.Label(meta, text="Daily pace --", fg=MUTED, bg=PANEL, font=FONT_META)
+            daily.pack(side="right")
+        else:
+            daily = None
 
         return {
             "name": name,
@@ -415,25 +554,27 @@ class QuotaOverlay:
         width = canvas.winfo_width()
         if width < 20:
             width = W - 2 * PAD - 20
+        height = canvas.winfo_height()
+        if height < 10:
+            height = TICK_H
+        bar_top = (height - BAR_H) // 2
         pct = clamp_pct(pct)
         fill_w = int(pct / 100 * width)
-        canvas.create_rectangle(0, 0, width, BAR_H, fill=TRACK, outline="")
+        canvas.create_rectangle(0, bar_top, width, bar_top + BAR_H, fill=TRACK, outline="")
         if fill_w > 0:
-            canvas.create_rectangle(0, 0, max(3, fill_w), BAR_H, fill=color, outline="")
+            canvas.create_rectangle(0, bar_top, max(3, fill_w), bar_top + BAR_H, fill=color, outline="")
         if pace:
+            # Vertical "should be here" tick: full canvas height with a dark
+            # halo so it reads clearly against both the fill and the track.
             expected = clamp_pct(pace.get("expected_remaining", 0))
-            marker_x = max(1, min(width - 2, int(expected / 100 * width)))
-            marker_color = GREEN
-            if pace.get("status") == "over":
+            marker_x = max(2, min(width - 3, int(expected / 100 * width)))
+            marker_color = FG
+            if pace.get("status") == "ahead":
+                marker_color = GREEN
+            elif pace.get("status") == "over":
                 marker_color = RED if pace.get("delta", 0) < -10 else YELLOW
-            canvas.create_rectangle(
-                marker_x - 1,
-                0,
-                marker_x + 1,
-                BAR_H,
-                fill=marker_color,
-                outline="",
-            )
+            canvas.create_rectangle(marker_x - 2, 0, marker_x + 3, height, fill="#0b1119", outline="")
+            canvas.create_rectangle(marker_x - 1, 0, marker_x + 2, height, fill=marker_color, outline="")
 
     def refresh(self):
         if self.fetching:
@@ -480,12 +621,22 @@ class QuotaOverlay:
             self.draw_dot(GREEN)
             self.status_label.config(text="cached" if cached else "live", fg=DIM)
 
+        self._apply_row(self.five_hour, snapshot.get("five_hour"))
         self._apply_row(self.weekly, snapshot["weekly"])
         prefix = "cached" if cached else "updated"
         source = snapshot.get("source", "api")
         self.footer.config(text=f"{prefix} {snapshot['updated']} via {source}")
 
     def _apply_row(self, row, data):
+        if not data:
+            row["value"].config(text="--", fg=MUTED)
+            row["reset"].config(text="--")
+            row["pace"].config(text="not in response", fg=MUTED)
+            if row["daily"]:
+                row["daily"].config(text="")
+            row["canvas"].delete("all")
+            return
+
         remaining = data["remaining"]
         color = color_for(remaining)
         pace = data.get("pace")
@@ -495,8 +646,9 @@ class QuotaOverlay:
         if pace and pace.get("status") == "over":
             pace_color = RED if pace.get("delta", 0) < -10 else YELLOW
         row["pace"].config(text=pace_text(pace), fg=pace_color if pace else MUTED)
-        daily = pace.get("daily_percent") if pace else "--"
-        row["daily"].config(text=f"Daily pace {daily}%")
+        if row["daily"]:
+            daily = pace.get("daily_percent") if pace else "--"
+            row["daily"].config(text=f"Daily pace {daily}%")
         self.draw_bar(row["canvas"], remaining, color, pace)
 
     def _show_error(self, status):

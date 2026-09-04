@@ -4,14 +4,19 @@
 
 這是一個 Windows 桌面小工具，用來顯示 OpenAI Codex / ChatGPT 的 quota 使用狀態。
 
-它會讀取本機 Codex OAuth token，也就是 `%USERPROFILE%\.codex\auth.json`，呼叫 ChatGPT usage endpoint，然後用小型 Tkinter 浮窗顯示目前的週額度。
+它會讀取本機 Codex OAuth token，也就是 `%USERPROFILE%\.codex\auth.json`，呼叫 ChatGPT usage endpoint，然後用小型 Tkinter 浮窗顯示目前的 5 小時與週額度。
 
 ## 這版更新
 
-- 配合 Codex 改成只有週額度的新版格式。
-- API 只有一個 7 天 `primary_window` 時，會正確視為週額度。
-- 若 API 日後改用明確的 `weekly_window` 名稱也能支援。
-- 舊版雙額度快取會自動作廢，避免顯示過期的 5 小時資料。
+- 配合 Codex 恢復成雙額度（5 小時 + 週）的新版格式。
+- 同一個視窗同時顯示兩條額度：5 小時在上、週額度在下。
+- `primary_window` 視為 5 小時額度，`secondary_window` 視為週額度。
+- 若 API 沒有回傳週額度，會 fallback 到最大的 window，且不會重複顯示同一個 window。
+- 每條額度橫條加了一條全高度的 pace 直槓：顯示「此刻應該用掉多少」。
+  - 綠色直槓 = 超前進度（用得比預期少）。
+  - 白色直槓 = 剛好跟上進度。
+  - 黃色/紅色直槓 = 落後進度（用得比預期多）。
+- 5 小時那一列不顯示「每日 pace」標籤，因為 5 小時窗口沒有每日 pace 的概念。
 - 優先使用 `https://chatgpt.com/backend-api/wham/usage`。
 - `https://chatgpt.com/backend-api/codex/usage` 改為備援。
 - User-Agent 改為 `codex-cli`，避免新版 Codex usage endpoint 在某些請求指紋下回傳 `403`。
@@ -19,12 +24,12 @@
 - 如果更新失敗，會保留上一筆成功讀到的 quota，不會整個變成空白。
 - 本機診斷訊息會寫入 `codex_quota_overlay.log`。
 - 上一筆成功讀取結果會快取在 `codex_quota_overlay_cache.json`。
-- 視窗改為較短的單一週額度橫條版面。
+- `launch.vbs` 優先用本機 Python 3.12（`%LocalAppData%\Programs\Python\Python312`），找不到才 fallback 到 PATH。
 
 ## 功能
 
-- 即時顯示週額度。
-- 依每日平均 14.3% 顯示「此刻合理剩餘」刻線。
+- 同一個視窗即時顯示 5 小時與週額度。
+- 全高度 pace 直槓，一眼看出目前應該用掉多少。
 - 一眼判斷目前是 `Ahead`、`On pace` 或 `Over pace`。
 - 依剩餘比例用綠色、黃色、紅色顯示。
 - 每 30 秒自動更新。
@@ -75,17 +80,20 @@ API 回傳格式大致如下：
     "allowed": true,
     "limit_reached": false,
     "primary_window": {
-      "used_percent": 28,
-      "limit_window_seconds": 604800,
+      "used_percent": 0,
+      "limit_window_seconds": 18000,
       "reset_at": 1781188385
     },
-    "secondary_window": null
+    "secondary_window": {
+      "used_percent": 34,
+      "limit_window_seconds": 604800,
+      "reset_at": 1781188385
+    }
   }
 }
 ```
 
-額度橫條上的細刻線代表：如果把用量平均分配在七天內，此刻理論上應剩下多少。
-這只是使用節奏提示，不是另一個每日上限；未使用的額度仍會保留到本週後續時間。
+`primary_window` 是 5 小時額度，`secondary_window` 是週額度。每條橫條上的全高度直槓代表：如果把用量平均分配在該窗口內，此刻理論上應剩下多少。這只是使用節奏提示，不是另一個上限；未使用的額度會保留到窗口重置為止。
 
 ## 隱私
 
