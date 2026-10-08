@@ -9,6 +9,8 @@ shows the real failure type instead of collapsing everything into "offline".
 import base64
 import json
 import os
+import queue
+import socket
 import ssl
 import threading
 import time
@@ -19,11 +21,22 @@ from datetime import datetime, timezone
 import tkinter as tk
 
 
+import ctypes
+
 try:
-    import ctypes
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
     pass
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".codex", "auth.json")
@@ -32,11 +45,15 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "codex_quota_overlay.log")
 CACHE_FILE = os.path.join(SCRIPT_DIR, "codex_quota_overlay_cache.json")
+LOCK_FILE = os.path.join(SCRIPT_DIR, ".overlay.lock")
 USAGE_URLS = [
     "https://chatgpt.com/backend-api/wham/usage",
     "https://chatgpt.com/backend-api/codex/usage",
 ]
 REFRESH_SEC = 30
+MAX_BACKOFF_SEC = 300
+LOG_MAX_BYTES = 200_000
+LOG_KEEP_LINES = 1000
 W = 430
 H = 448
 PAD = 20
@@ -77,6 +94,14 @@ class QuotaError(Exception):
 def log_error(status, detail):
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX_BYTES:
+            # Keep the tail so a long-running widget does not grow forever.
+            with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            kept = lines[-LOG_KEEP_LINES:]
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                f.writelines(kept)
+                f.write(f"[{stamp}] log trimmed to last {len(kept)} lines\n")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{stamp}] {status}: {detail}\n")
     except Exception:
@@ -98,15 +123,46 @@ def is_jwt_expired(token, buffer_sec=300):
     return False
 
 
-def refresh_access_token():
+_TOKEN_CACHE = {}
+
+
+def read_auth_file():
     try:
         with open(AUTH_FILE, "r", encoding="utf-8") as f:
-            auth_data = json.load(f)
+            return json.load(f)
     except FileNotFoundError as exc:
         raise QuotaError("login missing", "Cannot find .codex/auth.json") from exc
     except Exception as exc:
         raise QuotaError("login error", f"Cannot read auth file: {exc}") from exc
 
+
+def apply_token_response(current, token_resp, seen_refresh_token):
+    """Merge a refresh response into the auth file contents.
+
+    Returns (payload, access_token, should_write). If the Codex CLI refreshed the
+    file while we were on the network, its values are newer, so the file wins and
+    we skip the write instead of clobbering a fresher refresh token.
+    """
+    tokens = dict(current.get("tokens", {}))
+    access_token = token_resp.get("access_token")
+
+    if tokens.get("refresh_token") != seen_refresh_token:
+        return None, (tokens.get("access_token") or access_token), False
+
+    if access_token:
+        tokens["access_token"] = access_token
+    if "id_token" in token_resp:
+        tokens["id_token"] = token_resp["id_token"]
+    if "refresh_token" in token_resp:
+        tokens["refresh_token"] = token_resp["refresh_token"]
+
+    current["tokens"] = tokens
+    current["last_refresh"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return current, access_token, True
+
+
+def refresh_access_token():
+    auth_data = read_auth_file()
     tokens = auth_data.get("tokens", {})
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
@@ -140,41 +196,44 @@ def refresh_access_token():
     if not new_access_token:
         raise QuotaError("refresh failed", "No access_token in refresh response")
 
-    tokens["access_token"] = new_access_token
-    if "id_token" in token_resp:
-        tokens["id_token"] = token_resp["id_token"]
-    if "refresh_token" in token_resp:
-        tokens["refresh_token"] = token_resp["refresh_token"]
-
-    auth_data["tokens"] = tokens
-    auth_data["last_refresh"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
+    # Re-read before writing so a concurrent Codex CLI write is not overwritten.
     try:
-        tmp_file = AUTH_FILE + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(auth_data, f, indent=2)
-        os.replace(tmp_file, AUTH_FILE)
-    except Exception as exc:
-        log_error("save auth failed", str(exc))
+        current = read_auth_file()
+    except QuotaError as exc:
+        log_error("save auth skipped", str(exc))
+        _TOKEN_CACHE["access_token"] = new_access_token
+        return new_access_token
 
-    return new_access_token
+    write_payload, chosen_token, should_write = apply_token_response(
+        current, token_resp, refresh_token
+    )
+    if should_write:
+        try:
+            tmp_file = AUTH_FILE + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(write_payload, f, indent=2)
+            os.replace(tmp_file, AUTH_FILE)
+        except Exception as exc:
+            log_error("save auth failed", str(exc))
+    else:
+        log_error("auth file changed", "skipped write; another writer updated auth.json")
+
+    _TOKEN_CACHE["access_token"] = chosen_token
+    return chosen_token
 
 
 def read_token(force_refresh=False):
-    try:
-        with open(AUTH_FILE, encoding="utf-8") as f:
-            tokens = json.load(f).get("tokens", {})
-            token = tokens.get("access_token")
-    except FileNotFoundError as exc:
-        raise QuotaError("login missing", "Cannot find .codex/auth.json") from exc
-    except Exception as exc:
-        raise QuotaError("login error", f"Cannot read auth file: {exc}") from exc
+    cached = _TOKEN_CACHE.get("access_token")
+    if cached and not force_refresh and not is_jwt_expired(cached):
+        return cached
 
-    if not token or force_refresh or is_jwt_expired(token):
-        token = refresh_access_token()
-
+    token = read_auth_file().get("tokens", {}).get("access_token")
     if not token:
         raise QuotaError("login missing", "No access_token in auth.json")
+    if force_refresh or is_jwt_expired(token):
+        return refresh_access_token()
+
+    _TOKEN_CACHE["access_token"] = token
     return token
 
 
@@ -200,7 +259,7 @@ def fetch_usage_from_url(token, url):
         if exc.code in (401, 403):
             raise QuotaError(f"blocked {exc.code}", body or "Auth rejected") from exc
         raise QuotaError(f"http {exc.code}", body or "HTTP error") from exc
-    except TimeoutError as exc:
+    except (TimeoutError, socket.timeout) as exc:
         raise QuotaError("timeout", "Request timed out") from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
@@ -235,6 +294,13 @@ def fetch_usage(token):
             last_error = exc
     detail = "; ".join(errors)
     raise QuotaError(last_error.status, detail or last_error.detail)
+
+
+def next_delay(streak, base=REFRESH_SEC, cap=MAX_BACKOFF_SEC):
+    """Seconds to wait before the next refresh; backs off on consecutive errors."""
+    if streak <= 0:
+        return base
+    return min(cap, base * (2 ** streak))
 
 
 def color_for(pct):
@@ -314,13 +380,31 @@ def window_label(seconds):
 
 def window_data(window, now):
     used = clamp_pct(window.get("used_percent", 0))
+    reset_at = window.get("reset_at")
     return {
         "remaining": 100 - used,
         "used": used,
-        "reset": time_left(window.get("reset_at"), now),
+        # Raw fields are kept so a cached snapshot can be recomputed on render
+        # instead of showing the countdown/pace frozen at save time.
+        "reset_at": reset_at,
+        "reset": time_left(reset_at, now),
         "pace": quota_pace(window),
         "seconds": window_seconds(window),
     }
+
+
+def display_fields(data, now):
+    """Recompute renderable fields from raw values so a cached row is not stale."""
+    reset_at = data.get("reset_at")
+    if reset_at:
+        pace = quota_pace({
+            "used_percent": data.get("used", 0),
+            "limit_window_seconds": data.get("seconds", 0),
+            "reset_at": reset_at,
+        }, now_epoch=now.timestamp()) or data.get("pace")
+        return {"reset": time_left(reset_at, now), "pace": pace}
+    # Legacy cache rows only stored display strings.
+    return {"reset": data.get("reset") or "--", "pace": data.get("pace")}
 
 
 def pace_text(pace):
@@ -407,10 +491,95 @@ def save_cached_snapshot(snapshot):
         pass
 
 
+_lock_fd = None
+
+
+def _try_lock(fd):
+    """Take a non-blocking exclusive lock on the first byte.
+
+    Returns True when locked, False when another instance holds it, and None when
+    no OS-level lock is available.
+    """
+    if msvcrt:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    if fcntl:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+    return None
+
+
+def _unlock(fd):
+    if msvcrt:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+    elif fcntl:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+
+
+def acquire_instance_lock():
+    """Hold an exclusive OS lock so a second widget cannot start.
+
+    The OS releases the lock when the process exits, so a crashed instance does
+    not leave a stale lock behind. The lock is deliberately not PID-based: on
+    Windows os.kill(pid, 0) is TerminateProcess, not a liveness check.
+    """
+    global _lock_fd
+    try:
+        # O_RDWR (not append) so the lock is always taken on the same byte range.
+        _lock_fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT)
+    except Exception:
+        # No writable lock: run anyway rather than refuse to start.
+        return True
+
+    if _try_lock(_lock_fd) is False:
+        os.close(_lock_fd)
+        _lock_fd = None
+        return False
+
+    try:
+        os.lseek(_lock_fd, 0, os.SEEK_SET)
+        os.write(_lock_fd, str(os.getpid()).encode("utf-8"))
+    except Exception:
+        pass
+    return True
+
+
+def release_instance_lock():
+    global _lock_fd
+    if _lock_fd is None:
+        return
+    _unlock(_lock_fd)
+    try:
+        os.close(_lock_fd)
+    except Exception:
+        pass
+    try:
+        os.remove(LOCK_FILE)
+    except Exception:
+        pass
+    _lock_fd = None
+
+
 class QuotaOverlay:
     def __init__(self):
         self.last_snapshot = load_cached_snapshot()
         self.fetching = False
+        self.error_streak = 0
+        # Background threads only write to this queue; Tk is touched from the
+        # main thread by _drain_events, because Tcl/Tk is not thread-safe.
+        self.events = queue.Queue()
 
         self.root = tk.Tk()
         self.root.title("Codex Quota")
@@ -452,6 +621,7 @@ class QuotaOverlay:
             self._apply(self.last_snapshot, cached=True)
 
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+        self.root.after(100, self._drain_events)
         self.root.after(350, self.refresh)
         self.root.mainloop()
 
@@ -586,24 +756,51 @@ class QuotaOverlay:
         except Exception as exc:
             self.fetching = False
             log_error("thread start failed", str(exc))
+            self.error_streak += 1
             self._show_error("thread failed")
+            self._schedule_next_refresh()
 
     def _fetch(self):
         try:
             token = read_token()
             snapshot = build_snapshot(fetch_usage(token))
-            self.root.after(0, lambda: self._apply(snapshot))
+            self.events.put(("apply", snapshot, False))
         except QuotaError as exc:
             log_error(exc.status, exc.detail)
-            status = exc.status
-            self.root.after(0, lambda status=status: self._show_error(status))
+            self.events.put(("error", exc.status))
         except Exception as exc:
             detail = str(exc) or exc.__class__.__name__
             log_error("unexpected", detail)
-            self.root.after(0, lambda: self._show_error("read failed"))
-        finally:
-            self.root.after(0, self._finish_fetch)
-            self.root.after(REFRESH_SEC * 1000, self.refresh)
+            self.events.put(("error", "read failed"))
+        # Worker threads only queue events here; Tk calls happen in _drain_events.
+        self.events.put(("finish", None))
+
+    def _drain_events(self):
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            kind = event[0]
+            if kind == "apply":
+                self.error_streak = 0
+                self._apply(event[1], cached=event[2])
+            elif kind == "error":
+                self.error_streak += 1
+                self._show_error(event[1])
+            elif kind == "finish":
+                self._finish_fetch()
+                self._schedule_next_refresh()
+        self.root.after(200, self._drain_events)
+
+    def _schedule_next_refresh(self):
+        delay = next_delay(self.error_streak)
+        self.next_refresh.config(
+            text=f"every {delay}s" if delay == REFRESH_SEC else f"backoff {delay}s"
+        )
+        # Scheduled from the main thread only, so the auto-refresh chain survives
+        # a failed thread start or a fetch that produced no usable result.
+        self.root.after(delay * 1000, self.refresh)
 
     def _finish_fetch(self):
         self.fetching = False
@@ -639,9 +836,14 @@ class QuotaOverlay:
 
         remaining = data["remaining"]
         color = color_for(remaining)
-        pace = data.get("pace")
+
+        # Recompute from raw fields so a cached row shows the current countdown
+        # and pace, not the values frozen when the cache was written.
+        display = display_fields(data, datetime.now(timezone.utc))
+        pace = display["pace"]
+
         row["value"].config(text=fmt_pct(remaining), fg=color)
-        row["reset"].config(text=f"resets in {data['reset']}")
+        row["reset"].config(text=f"resets in {display['reset']}")
         pace_color = GREEN
         if pace and pace.get("status") == "over":
             pace_color = RED if pace.get("delta", 0) < -10 else YELLOW
@@ -668,5 +870,32 @@ class QuotaOverlay:
             self.footer.config(text=f"{display} - retrying")
 
 
+def notify_already_running():
+    if not hasattr(ctypes, "windll"):
+        return
+    try:
+        # MessageBoxW is stdcall with four parameters; passing three would leave
+        # the stack unbalanced and can crash the process.
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Codex Quota Overlay is already running.",
+            "Codex Quota",
+            0x40,  # MB_ICONINFORMATION | MB_OK
+        )
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    QuotaOverlay()
+    if not acquire_instance_lock():
+        log_error("already running", "another overlay instance holds the lock")
+        notify_already_running()
+        raise SystemExit(0)
+    try:
+        QuotaOverlay()
+    except Exception as exc:
+        # pythonw has no console, so a startup failure is otherwise invisible.
+        log_error("startup failed", str(exc) or exc.__class__.__name__)
+        raise
+    finally:
+        release_instance_lock()

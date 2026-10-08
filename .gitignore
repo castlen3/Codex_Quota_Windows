@@ -27,3 +27,4 @@ auth.json
 codex_quota_status.json
 codex_quota_overlay.log
 codex_quota_overlay_cache.json
+.overlay.lock

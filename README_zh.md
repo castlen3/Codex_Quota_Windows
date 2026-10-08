@@ -22,7 +22,10 @@
 - User-Agent 改為 `codex-cli`，避免新版 Codex usage endpoint 在某些請求指紋下回傳 `403`。
 - 狀態顯示更清楚，例如 `blocked 403`、`timeout`、`login missing`、`network error`。
 - 如果更新失敗，會保留上一筆成功讀到的 quota，不會整個變成空白。
-- 本機診斷訊息會寫入 `codex_quota_overlay.log`。
+- 本機診斷訊息會寫入 `codex_quota_overlay.log`，超過 200 KB 後只保留最後 1000 行。
+- 連續失敗會退避（30s → 60s → 120s → 240s → 300s），footer 會顯示目前間隔；成功讀取後回到 30s。
+- 寫入 `auth.json` 前會先重讀，若 Codex CLI 在請求期間已更新檔案，就不會覆蓋它。
+- 同時只會執行一個實例；第二次啟動會顯示提示後結束。
 - 上一筆成功讀取結果會快取在 `codex_quota_overlay_cache.json`。
 - `launch.vbs` 優先用本機 Python 3.12（`%LocalAppData%\Programs\Python\Python312`），找不到才 fallback 到 PATH。
 

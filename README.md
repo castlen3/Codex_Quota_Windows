@@ -22,7 +22,13 @@ The overlay reads your local Codex OAuth token from `%USERPROFILE%\.codex\auth.j
 - Uses a legacy `codex-cli` User-Agent because the newer Codex usage endpoint can return `403` for some request fingerprints.
 - Shows clearer status labels such as `blocked 403`, `timeout`, `login missing`, and `network error`.
 - Keeps the last successful quota reading visible if a later refresh fails.
-- Writes local diagnostic messages to `codex_quota_overlay.log`.
+- Writes local diagnostic messages to `codex_quota_overlay.log`, trimmed to its
+  last 1000 lines once it passes 200 KB.
+- Backs off on consecutive failures (30s → 60s → 120s → 240s → 300s) and shows
+  the current wait in the footer; a successful read resets it to 30s.
+- Re-reads `auth.json` before writing, so a Codex CLI refresh that happened
+  during the request is not overwritten.
+- Runs only one instance at a time; a second launch exits with a brief message.
 - Stores the last successful reading in `codex_quota_overlay_cache.json`.
 - `launch.vbs` prefers a local Python 3.12 install (`%LocalAppData%\Programs\Python\Python312`) and falls back to `PATH`.
 
