@@ -25,6 +25,11 @@
   `.overlay.lock`, not a PID check, so a crashed instance never leaves a stale
   lock behind.
 
+- Added the `LICENSE` file both READMEs referred to.
+- `quota_mode` is no longer written; the cache loader validates the snapshot
+  shape instead, so a cache file without the legacy field still loads.
+- `docs/superpowers/` is marked as historical.
+
 ### Layout
 
 - Restored the two-window Codex quota layout (5-hour + weekly) in a single window.
@@ -38,12 +43,14 @@
 
 ### Known minor issues
 
-- `quota_mode` is always written as `dual` while the cache loader still accepts
-  the legacy `weekly` value.
-- The window is taller than its content, leaving a gap above the footer.
-- No `LICENSE` file is present even though both READMEs say MIT.
-- `docs/superpowers/` still describes the macOS dashboards and the older
-  single-row layout.
+- The cache file is rewritten on every successful refresh (about 2880 writes a
+  day); it could be written only when the values change.
+- `draw_bar` falls back to a hardcoded width on the first paint because
+  `winfo_width()` is still 1 before the window is mapped, so the pace tick can be
+  misplaced until the next refresh.
+- Log timestamps use local time while the snapshot uses UTC.
+- The desktop `Codex Quota Overlay.bat` duplicates `launch.vbs` and hardcodes a
+  user path.
 
 ## Previously (weekly-only)
 

@@ -1,5 +1,10 @@
 # Weekly Quota Pace Design
 
+> **Historical.** Written while the quota was weekly-only. The pace formula is
+> still current, but the Windows overlay now renders the 5-hour and weekly rows
+> again, so "materially shorter than the old two-row version" no longer describes
+> this repository, and the 8765/8766 and `/lite` views are not part of it.
+
 ## Goal
 
 Make a weekly-only Codex quota immediately understandable. The user should be

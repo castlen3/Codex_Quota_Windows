@@ -106,4 +106,4 @@ API 回傳格式大致如下：
 
 ## 授權
 
-MIT
+MIT，見 [LICENSE](LICENSE)。

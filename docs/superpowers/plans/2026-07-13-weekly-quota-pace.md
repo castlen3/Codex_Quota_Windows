@@ -1,5 +1,9 @@
 # Weekly Quota Pace Implementation Plan
 
+> **Historical.** Written for the macOS dashboards (ports 8765/8766 and `/lite`).
+> Only Task 3 applies to this repository, and the Windows overlay has since gone
+> back to two rows, so the layout steps here no longer match the code.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an expected weekly-usage marker and Ahead/Over pace status to the 8765, 8766, `/lite`, and Windows quota displays.

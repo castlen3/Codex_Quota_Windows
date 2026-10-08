@@ -112,4 +112,4 @@ separate limit; unused quota remains available until the window resets.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

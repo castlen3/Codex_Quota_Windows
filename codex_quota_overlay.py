@@ -463,7 +463,6 @@ def build_snapshot(data):
 
     return {
         "plan": str(data.get("plan_type") or "?").upper(),
-        "quota_mode": "dual",
         "limit_reached": bool(rl.get("limit_reached", False)),
         "five_hour": window_data(five_hour, now) if five_hour else None,
         "weekly": window_data(weekly, now),
@@ -476,7 +475,10 @@ def load_cached_snapshot():
     try:
         with open(CACHE_FILE, encoding="utf-8") as f:
             snapshot = json.load(f)
-        if isinstance(snapshot, dict) and snapshot.get("quota_mode") in ("dual", "weekly") and "weekly" in snapshot:
+        # The old weekly-only format stored a quota_mode marker; the current
+        # snapshot shape is enough on its own, so a cache file written without
+        # that field still loads.
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("weekly"), dict):
             return snapshot
     except Exception:
         pass

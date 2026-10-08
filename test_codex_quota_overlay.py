@@ -43,7 +43,6 @@ class BuildSnapshotTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(snapshot["quota_mode"], "dual")
         self.assertEqual(snapshot["five_hour"]["remaining"], 88)
         self.assertEqual(snapshot["five_hour"]["used"], 12)
         self.assertEqual(snapshot["five_hour"]["seconds"], 18000)
@@ -85,7 +84,6 @@ class BuildSnapshotTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(snapshot["quota_mode"], "dual")
         self.assertIsNone(snapshot["five_hour"])
         self.assertEqual(snapshot["weekly"]["remaining"], 88)
 
@@ -200,6 +198,31 @@ class CachedSnapshotTests(unittest.TestCase):
         display = display_fields(legacy, datetime.now(timezone.utc))
         self.assertEqual(display["reset"], "5d 12h")
         self.assertEqual(display["pace"], legacy["pace"])
+
+    def test_loader_accepts_a_cache_file_without_the_legacy_mode_field(self):
+        snapshot = build_snapshot({
+            "plan_type": "plus",
+            "rate_limit": {
+                "secondary_window": {
+                    "used_percent": 34,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1_800_000_000,
+                },
+            },
+        })
+        path = os.path.join(tempfile.gettempdir(), "dsh_cache_round_trip.json")
+        saved = codex_quota_overlay.CACHE_FILE
+        codex_quota_overlay.CACHE_FILE = path
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f)
+            self.assertEqual(codex_quota_overlay.load_cached_snapshot(), snapshot)
+        finally:
+            codex_quota_overlay.CACHE_FILE = saved
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 class FetchErrorTests(unittest.TestCase):
