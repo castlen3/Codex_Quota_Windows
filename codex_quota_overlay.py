@@ -366,18 +366,6 @@ def window_seconds(window):
         return 0.0
 
 
-def window_label(seconds):
-    try:
-        seconds = float(seconds)
-    except (TypeError, ValueError):
-        return "window"
-    if seconds >= 86400:
-        return f"{seconds / 86400:.0f}d window"
-    if seconds >= 3600:
-        return f"{seconds / 3600:.0f}h window"
-    return f"{seconds / 60:.0f}m window"
-
-
 def window_data(window, now):
     used = clamp_pct(window.get("used_percent", 0))
     reset_at = window.get("reset_at")
@@ -471,7 +459,28 @@ def build_snapshot(data):
     }
 
 
+_last_cache_signature = None
+
+
+def cache_signature(snapshot):
+    """The cache-relevant fields, excluding display-only values such as the clock."""
+
+    def row(values):
+        if not values:
+            return None
+        return (values.get("used"), values.get("reset_at"), values.get("seconds"))
+
+    return (
+        snapshot.get("plan"),
+        snapshot.get("limit_reached"),
+        snapshot.get("source"),
+        row(snapshot.get("five_hour")),
+        row(snapshot.get("weekly")),
+    )
+
+
 def load_cached_snapshot():
+    global _last_cache_signature
     try:
         with open(CACHE_FILE, encoding="utf-8") as f:
             snapshot = json.load(f)
@@ -479,6 +488,7 @@ def load_cached_snapshot():
         # snapshot shape is enough on its own, so a cache file written without
         # that field still loads.
         if isinstance(snapshot, dict) and isinstance(snapshot.get("weekly"), dict):
+            _last_cache_signature = cache_signature(snapshot)
             return snapshot
     except Exception:
         pass
@@ -486,11 +496,17 @@ def load_cached_snapshot():
 
 
 def save_cached_snapshot(snapshot):
+    global _last_cache_signature
+    signature = cache_signature(snapshot)
+    if signature == _last_cache_signature:
+        # The quota itself did not change, so there is nothing to rewrite.
+        return
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, indent=2)
     except Exception:
-        pass
+        return
+    _last_cache_signature = signature
 
 
 _lock_fd = None
@@ -579,6 +595,7 @@ class QuotaOverlay:
         self.last_snapshot = load_cached_snapshot()
         self.fetching = False
         self.error_streak = 0
+        self._first_map_done = False
         # Background threads only write to this queue; Tk is touched from the
         # main thread by _drain_events, because Tcl/Tk is not thread-safe.
         self.events = queue.Queue()
@@ -609,6 +626,7 @@ class QuotaOverlay:
         self.menu.add_separator()
         self.menu.add_command(label="Close", command=self.root.destroy)
         self.root.bind("<Button-3>", self.show_menu)
+        self.root.bind("<Map>", self._on_map)
 
         self.card = tk.Frame(self.root, bg=PANEL, bd=0, highlightthickness=1,
                              highlightbackground="#263246")
@@ -707,6 +725,14 @@ class QuotaOverlay:
 
     def show_menu(self, event):
         self.menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_map(self, event):
+        # Canvas widths are unknown until the window is mapped, so the first
+        # paint falls back to a constant. Redraw once the real width is known.
+        if self._first_map_done or not self.last_snapshot:
+            return
+        self._first_map_done = True
+        self._apply(self.last_snapshot, cached=True)
 
     def toggle_topmost(self):
         self.root.attributes("-topmost", self.topmost_var.get())

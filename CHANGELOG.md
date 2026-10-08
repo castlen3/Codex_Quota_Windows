@@ -30,6 +30,13 @@
   shape instead, so a cache file without the legacy field still loads.
 - `docs/superpowers/` is marked as historical.
 
+- The cache is written only when the quota actually changes, not on every refresh.
+- The bars are redrawn once the window is mapped, so the first paint no longer
+  depends on a fallback width.
+- Removed the unused `window_label` helper.
+- The desktop launcher `.bat` no longer hardcodes a user path and reports when
+  Python is missing instead of failing silently.
+
 ### Layout
 
 - Restored the two-window Codex quota layout (5-hour + weekly) in a single window.
@@ -43,14 +50,8 @@
 
 ### Known minor issues
 
-- The cache file is rewritten on every successful refresh (about 2880 writes a
-  day); it could be written only when the values change.
-- `draw_bar` falls back to a hardcoded width on the first paint because
-  `winfo_width()` is still 1 before the window is mapped, so the pace tick can be
-  misplaced until the next refresh.
-- Log timestamps use local time while the snapshot uses UTC.
-- The desktop `Codex Quota Overlay.bat` duplicates `launch.vbs` and hardcodes a
-  user path.
+- The fixed window height (448 px) is 6 px short of the measured content height
+  (454 px). Confirmed visually acceptable, so it is left as is.
 
 ## Previously (weekly-only)
 

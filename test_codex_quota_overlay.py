@@ -225,6 +225,49 @@ class CachedSnapshotTests(unittest.TestCase):
                 pass
 
 
+class CacheWriteTests(unittest.TestCase):
+    def test_display_only_changes_do_not_rewrite_the_cache(self):
+        snapshot = build_snapshot({
+            "plan_type": "plus",
+            "rate_limit": {
+                "secondary_window": {
+                    "used_percent": 34,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1_800_000_000,
+                },
+            },
+        })
+        path = os.path.join(tempfile.gettempdir(), "dsh_cache_write_test.json")
+        saved_file = codex_quota_overlay.CACHE_FILE
+        saved_sig = codex_quota_overlay._last_cache_signature
+        codex_quota_overlay.CACHE_FILE = path
+        codex_quota_overlay._last_cache_signature = None
+        try:
+            codex_quota_overlay.save_cached_snapshot(snapshot)
+
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("sentinel")
+
+            # Same quota, different clock: must not rewrite the file.
+            codex_quota_overlay.save_cached_snapshot(dict(snapshot, updated="23:59:59"))
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "sentinel")
+
+            # A real quota change does rewrite it.
+            changed = json.loads(json.dumps(snapshot))
+            changed["weekly"]["used"] = 40
+            codex_quota_overlay.save_cached_snapshot(changed)
+            with open(path, encoding="utf-8") as f:
+                self.assertNotEqual(f.read(), "sentinel")
+        finally:
+            codex_quota_overlay.CACHE_FILE = saved_file
+            codex_quota_overlay._last_cache_signature = saved_sig
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 class FetchErrorTests(unittest.TestCase):
     def test_socket_timeout_is_classified_as_timeout(self):
         original = codex_quota_overlay.urllib.request.urlopen
